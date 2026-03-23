@@ -24,7 +24,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, make_response
 from flask_cors import CORS
 
 # ── 로깅 설정 ─────────────────────────────────────────
@@ -58,10 +58,25 @@ except ImportError:
     EXCEL_AVAILABLE = False
     log.warning("openpyxl 없음 — 엑셀 기능 비활성")
 
-# ── Flask 앱 ──────────────────────────────────────────
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+CORS(app, supports_credentials=False,
+     origins="*",
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "OPTIONS"])
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20MB
+
+
+# ── CORS preflight 전역 처리 ──────────────────────────
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        res = make_response()
+        res.headers["Access-Control-Allow-Origin"] = "*"
+        res.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        res.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        res.headers["Access-Control-Max-Age"] = "3600"
+        return res, 200
+
 
 
 # ════════════════════════════════════════════════════════
