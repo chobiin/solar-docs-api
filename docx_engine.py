@@ -52,18 +52,18 @@ def _cell_text(cell) -> str:
     return cell.text.strip()
 
 
-def _set_cell_text(cell, text: str, bold=False, font_size=9, keep_format=True):
+def _set_cell_text(cell, text: str, bold=False, font_size=9, keep_format=True,
+                   force_no_bold=False):
     """
     셀의 첫 번째 단락 텍스트를 교체합니다.
     기존 폰트/정렬은 유지하고 텍스트만 바꿉니다.
+    force_no_bold=True 이면 bold를 강제로 False로 설정합니다.
     """
     if not cell.paragraphs:
         return
 
     para = cell.paragraphs[0]
 
-    # 기존 런(run)들을 모두 제거하고 새 런 하나만 추가
-    # 단, 기존 런의 서식을 복사
     existing_format = None
     if para.runs:
         r = para.runs[0]
@@ -83,8 +83,8 @@ def _set_cell_text(cell, text: str, bold=False, font_size=9, keep_format=True):
     new_run = para.add_run(str(text) if text else "")
 
     if keep_format and existing_format:
-        if existing_format['bold'] is not None:
-            new_run.bold = existing_format['bold']
+        # force_no_bold=True 이면 bold 강제 해제
+        new_run.bold = False if force_no_bold else existing_format['bold']
         if existing_format['italic'] is not None:
             new_run.italic = existing_format['italic']
         if existing_format['font_name']:
@@ -205,109 +205,92 @@ def fill_doc1_supply_contract(d: dict) -> Document:
     tpl = TEMPLATE_DIR / "1_공급계약신고서.docx"
     doc = Document(str(tpl))
 
+    # 한화솔루션 고정 정보 (skip 조건)
+    SKIP_KEYWORDS = ["한화솔루션", "박승덕", "725-85-01217", "110111-0360935",
+                     "서울 2010", "02-1600"]
+
+    def _is_fixed_row(row_text):
+        return any(kw in row_text for kw in SKIP_KEYWORDS)
+
+    def _fill_next_empty(cells, start_idx, value):
+        """start_idx 이후 첫 번째 빈 셀에 값 채우기"""
+        for j in range(start_idx + 1, len(cells)):
+            if not cells[j].text.strip():
+                _set_cell_text(cells[j], value)
+                return True
+        return False
+
     for table in doc.tables:
         for row in table.rows:
             cells = row.cells
             row_text = " ".join(c.text.strip() for c in cells)
 
-            # ── 재생에너지발전사업자 블록 ──
-            # 상호
-            if any("상" in c.text and "호" in c.text for c in cells[:3]) and \
-               any(c.text.strip() == "" for c in cells[3:]):
-                # 발전사업자 상호 행인지 확인 (공급사업자 행 제외)
-                if "한화솔루션" not in row_text:
-                    for i, c in enumerate(cells):
-                        t = c.text.strip()
-                        if ("상" in t and "호" in t) or t in ("상호", "상 호"):
-                            # 다음 값 셀
-                            for j in range(i+1, len(cells)):
-                                if not cells[j].text.strip():
-                                    _set_cell_text(cells[j], d.get("상호명", ""))
-                                    break
+            # 한화솔루션 고정 행은 완전 스킵
+            if _is_fixed_row(row_text):
+                continue
+
+            for i, cell in enumerate(cells):
+                ct = cell.text.strip()
+
+                # ── 상호 ──
+                if ct in ("상호", "상 호") and i + 1 < len(cells):
+                    _fill_next_empty(cells, i, d.get("상호명", ""))
+
+                # ── 대표자명 ──
+                elif ("대표자명" in ct or "대 표 자 명" in ct) \
+                        and i + 1 < len(cells):
+                    # 대표자명 값 채우기
+                    _fill_next_empty(cells, i, d.get("대표자명", ""))
+                    # 같은 행의 전화번호 셀도 채우기
+                    for j in range(i + 1, len(cells)):
+                        ctj = cells[j].text.strip()
+                        if "전화번호" in ctj or "전 화 번 호" in ctj:
+                            _fill_next_empty(cells, j, d.get("연락처", ""))
                             break
 
-            # 대표자명
-            if "대표자명" in row_text and "한화솔루션" not in row_text \
-               and "박승덕" not in row_text:
-                for i, c in enumerate(cells):
-                    if "대표자명" in c.text or "대 표 자 명" in c.text:
-                        for j in range(i+1, len(cells)):
-                            if not cells[j].text.strip():
-                                _set_cell_text(cells[j], d.get("대표자명", ""))
-                                break
-                        # 전화번호 (같은 행 오른쪽)
-                        for j in range(i+1, len(cells)):
-                            if "전화번호" in cells[j].text or "전 화 번 호" in cells[j].text:
-                                for k in range(j+1, len(cells)):
-                                    if not cells[k].text.strip():
-                                        _set_cell_text(cells[k], d.get("연락처", ""))
-                                        break
-                                break
-                        break
+                # ── 대표자 (서명란 등 단독 라벨) ──
+                elif ("대표자" in ct or "대 표 자" in ct) \
+                        and "대표자명" not in ct \
+                        and i + 1 < len(cells):
+                    if not cells[i + 1].text.strip():
+                        _set_cell_text(cells[i + 1], d.get("대표자명", ""))
 
-            # 주소 (사업장주소) - 발전사업자
-            if "주소" in row_text and "한화솔루션" not in row_text \
-               and "서울특별시" not in row_text:
-                for i, c in enumerate(cells):
-                    if c.text.strip() in ("주소", "주 소") and i < len(cells)-1:
-                        for j in range(i+1, len(cells)):
-                            if not cells[j].text.strip():
-                                addr = d.get("사업장주소", "")
-                                _set_cell_text(cells[j], addr)
-                                break
-                        break
+                # ── 주소 (발전사업자 본문 및 서명란) ──
+                # "서울특별시"가 같은 행에 있으면 공급사업자 주소 → 스킵
+                elif ct in ("주소", "주 소") \
+                        and "서울특별시" not in row_text \
+                        and i + 1 < len(cells):
+                    if not cells[i + 1].text.strip():
+                        _set_cell_text(cells[i + 1], d.get("사업장주소", ""))
 
-            # 법인등록번호 - 발전사업자
-            if "법인" in row_text and "등록번호" in row_text \
-               and "110111" not in row_text:
-                for i, c in enumerate(cells):
-                    if "법인" in c.text and "등록번호" in c.text:
-                        for j in range(i+1, len(cells)):
-                            if not cells[j].text.strip():
-                                _set_cell_text(cells[j], d.get("법인등록번호", ""))
-                                break
-                        break
+                # ── 법인등록번호 ──
+                elif "법인" in ct and "등록번호" in ct \
+                        and i + 1 < len(cells):
+                    if not cells[i + 1].text.strip():
+                        _set_cell_text(cells[i + 1], d.get("법인등록번호", ""))
 
-            # 사업자등록번호 - 발전사업자
-            if "사업자등록번호" in row_text and "725-85" not in row_text:
-                for i, c in enumerate(cells):
-                    if "사업자등록번호" in c.text:
-                        for j in range(i+1, len(cells)):
-                            if not cells[j].text.strip():
-                                _set_cell_text(cells[j], d.get("사업자등록번호", ""))
-                                break
-                        break
+                # ── 사업자등록번호 ──
+                elif "사업자등록번호" in ct and i + 1 < len(cells):
+                    if not cells[i + 1].text.strip():
+                        _set_cell_text(cells[i + 1], d.get("사업자등록번호", ""))
 
-            # 전기사업자등록번호 - 발전사업자
-            if "전기사업자등록번호" in row_text and "서울 2010" not in row_text:
-                for i, c in enumerate(cells):
-                    if "전기사업자등록번호" in c.text:
-                        for j in range(i+1, len(cells)):
-                            if not cells[j].text.strip():
-                                _set_cell_text(cells[j], d.get("전기사업자등록번호", ""))
-                                break
-                        break
+                # ── 전기사업자등록번호 ──
+                elif "전기사업자등록번호" in ct and i + 1 < len(cells):
+                    if not cells[i + 1].text.strip():
+                        _set_cell_text(cells[i + 1], d.get("전기사업자등록번호", ""))
 
-            # 발전기 주소
-            if "발전기" in row_text and ("주소" in row_text or "설치" in row_text):
-                for i, c in enumerate(cells):
-                    if ("발전기" in c.text and "주소" in c.text) or "발전기주소" in c.text:
-                        for j in range(i+1, len(cells)):
-                            if not cells[j].text.strip():
-                                addr = d.get("발전기주소") or d.get("사업장주소", "")
-                                _set_cell_text(cells[j], addr)
-                                break
-                        break
+                # ── 발전기 주소 ──
+                elif ("발전기" in ct and "주소" in ct) \
+                        and i + 1 < len(cells):
+                    if not cells[i + 1].text.strip():
+                        addr = d.get("발전기주소") or d.get("사업장주소", "")
+                        _set_cell_text(cells[i + 1], addr)
 
-            # 설비용량 (태양광)
-            if "설비용량" in row_text or ("태양광" in row_text and "kW" in row_text):
-                for i, c in enumerate(cells):
-                    if "태양광" in c.text or "설비용량" in c.text:
-                        for j in range(i+1, len(cells)):
-                            if not cells[j].text.strip():
-                                _set_cell_text(cells[j], str(d.get("설비용량", "")))
-                                break
-                        break
+                # ── 설비용량 (태양광) ──
+                elif ("설비용량" in ct or ("태양광" in ct and "kW" in ct)) \
+                        and i + 1 < len(cells):
+                    if not cells[i + 1].text.strip():
+                        _set_cell_text(cells[i + 1], str(d.get("설비용량", "")))
 
     # 날짜 채우기
     _fill_date(doc, d.get("계약연도"), d.get("계약월"), d.get("계약일"))
@@ -319,6 +302,24 @@ def fill_doc1_supply_contract(d: dict) -> Document:
 #  서류 2: 이용신청서
 # ════════════════════════════════════════════════════════
 
+def _set_label_cell_font(cell, font_size_pt=7.5):
+    """
+    카테고리 라벨 셀의 폰트: bold 제거 + 크기 축소
+    표 왼쪽 세로 카테고리명(재생에너지발전사업자 등)이 잘리는 문제 해결용
+    """
+    for para in cell.paragraphs:
+        for run in para.runs:
+            run.bold = False
+            run.font.size = Pt(font_size_pt)
+            # 동아시아 폰트
+            rPr = run._element.get_or_add_rPr()
+            rFonts = rPr.find(qn('w:rFonts'))
+            if rFonts is None:
+                rFonts = OxmlElement('w:rFonts')
+                rPr.insert(0, rFonts)
+            rFonts.set(qn('w:eastAsia'), '맑은 고딕')
+
+
 def fill_doc2_application(d: dict) -> Document:
     """
     2. 전력거래계약용 이용신청서
@@ -329,11 +330,20 @@ def fill_doc2_application(d: dict) -> Document:
       ⑦담당자명  ⑧전자우편주소
       ⑨사업허가사항  ⑩희망연계점
     재생에너지전기공급사업자 블록: 고정값
+    하단 서명란: 발전사업자 주소/대표자 입력
     """
     tpl = TEMPLATE_DIR / "2_이용신청서.docx"
     doc = Document(str(tpl))
 
-    # 필드 매핑: 라벨 → (값, col_offset)
+    # 카테고리 라벨 키워드 (왼쪽 세로 카테고리명)
+    LABEL_KEYWORDS = [
+        "재생에너지발전사업자", "재생에 너지 발전사업자",
+        "전기사용자", "전 기 사 용 자",
+        "재생에너지전기공급사업자", "재생에너지 전기공급사업자",
+        "발전사업자", "공급사업자",
+    ]
+
+    # 필드 매핑: 라벨 → 값
     field_map = {
         "①사 업 자 명":   d.get("상호명", ""),
         "①사업자명":      d.get("상호명", ""),
@@ -354,19 +364,43 @@ def fill_doc2_application(d: dict) -> Document:
             cells = row.cells
             row_text = " ".join(c.text for c in cells)
 
-            # 재생에너지공급사업자 블록은 건드리지 않음
+            # 왼쪽 카테고리 라벨 셀: bold 제거 + 폰트 축소
+            # cells[0]뿐 아니라 세로 병합으로 같은 텍스트가 다른 열에도 올 수 있으므로
+            # 모든 셀 검사
+            for ci, cc in enumerate(cells):
+                for kw in LABEL_KEYWORDS:
+                    if kw in cc.text:
+                        _set_label_cell_font(cc, font_size_pt=7.5)
+                        break
+
+            # 재생에너지공급사업자 블록(한화솔루션)은 값 입력 건드리지 않음
             if "한화솔루션" in row_text or MY["전화번호"] in row_text:
                 continue
 
             for i, cell in enumerate(cells):
                 ct = cell.text.strip()
+
+                # 하단 서명란: 발전사업자 주소
+                if ("주소" in ct or "주 소" in ct) \
+                        and "서울" not in row_text \
+                        and i + 1 < len(cells):
+                    if not cells[i+1].text.strip():
+                        _set_cell_text(cells[i+1], d.get("사업장주소", ""))
+                    continue
+
+                # 하단 서명란: 발전사업자 대표자
+                if ("대표자" in ct or "대 표 자" in ct) \
+                        and "박승덕" not in row_text \
+                        and i + 1 < len(cells):
+                    if not cells[i+1].text.strip():
+                        _set_cell_text(cells[i+1], d.get("대표자명", ""))
+                    continue
+
+                # 일반 필드 매핑
                 for label, value in field_map.items():
                     if label in ct:
-                        # 같은 셀에 값이 있는지 확인, 없으면 다음 셀
-                        # 셀이 라벨 전용인 경우 바로 옆 셀에 입력
                         if i + 1 < len(cells):
                             target = cells[i + 1]
-                            # 값이 아직 비어있으면 채우기
                             if not target.text.strip() or target.text.strip() in ("　", " "):
                                 _set_cell_text(target, value)
                         break
@@ -424,6 +458,19 @@ def fill_doc3_power_contract(d: dict) -> Document:
                 elif ct in ("주소", "주 소") and "서울특별시" not in row_text:
                     if i + 1 < len(cells) and not cells[i+1].text.strip():
                         _set_cell_text(cells[i+1], d.get("사업장주소", ""))
+
+                # 하단 서명란 발전사업자 주소 (라벨에 '주소' 포함된 경우)
+                elif "주소" in ct and "서울특별시" not in row_text \
+                        and i + 1 < len(cells):
+                    if not cells[i+1].text.strip():
+                        _set_cell_text(cells[i+1], d.get("사업장주소", ""))
+
+                # 하단 서명란 발전사업자 대표자
+                elif ("대표자" in ct or "대 표 자" in ct) \
+                        and "박승덕" not in row_text \
+                        and i + 1 < len(cells):
+                    if not cells[i+1].text.strip():
+                        _set_cell_text(cells[i+1], d.get("대표자명", ""))
 
                 elif "법인" in ct and "등록번호" in ct and "110111" not in row_text:
                     if i + 1 < len(cells) and not cells[i+1].text.strip():
@@ -536,6 +583,11 @@ def fill_doc6_facility_contract(d: dict) -> Document:
     6. 전력거래계약용 전기설비이용계약서
     주요 입력:
       고객(발전사업자) 상호명, 대표자명, 주소, 사업자번호
+
+    주의:
+      - '전기사용자' 표의 '사업장주소(이용장소)' 셀은 빈란으로 둠
+        (전기공급사업자의 사업장주소와 다른 항목)
+      - '이용장소', '이용 장소' 텍스트가 포함된 행은 주소 입력 스킵
     """
     tpl = TEMPLATE_DIR / "6_전기설비이용계약서.docx"
     doc = Document(str(tpl))
@@ -550,6 +602,9 @@ def fill_doc6_facility_contract(d: dict) -> Document:
                 continue
             # 한화솔루션 고정값 스킵
             if "한화솔루션" in row_text:
+                continue
+            # 전기사용자 표의 사업장주소(이용장소) 행 — 빈란 유지
+            if "이용장소" in row_text or "이용 장소" in row_text:
                 continue
 
             for i, cell in enumerate(cells):
@@ -588,34 +643,54 @@ def fill_doc7_compliance(d: dict) -> Document:
     rep = d.get("대표자명", "")
     addr = d.get("사업장주소", "")
 
-    # 본문 단락: [협력업체] 치환
+    # ── 본문 단락: 협력업체 → 상호명 치환 ──────────────────────────
+    # "협력업체" 텍스트가 여러 run에 분산될 수 있으므로
+    # run 단위로 순회하며 치환
     for para in doc.paragraphs:
-        if "[협력업체" in para.text or "협력업체" in para.text:
-            for run in para.runs:
-                if "[협력업체" in run.text:
-                    run.text = run.text.replace("[협력업체", f"[{company}")
-                elif "협력업체" == run.text.strip():
-                    run.text = company
+        if "협력업체" not in para.text:
+            continue
+        for run in para.runs:
+            if "협력업체" in run.text:
+                run.text = run.text.replace("협력업체", company)
 
-    # 테이블 내부
+    # ── 테이블 내부 ──────────────────────────────────────────────
     for table in doc.tables:
         for row in table.rows:
             cells = row.cells
             for i, cell in enumerate(cells):
                 ct = cell.text.strip()
-                # 서약란 주소/상호/대표자
-                if ("주소" in ct or "주 소" in ct) and i + 1 < len(cells):
-                    if not cells[i+1].text.strip():
-                        _set_cell_text(cells[i+1], addr)
-                elif ("상호" in ct or "상 호" in ct) and i + 1 < len(cells):
+
+                # 셀 안에 협력업체 텍스트가 있으면 치환
+                if "협력업체" in ct:
+                    _set_cell_text(cell, ct.replace("협력업체", company))
+                    continue
+
+                # 3페이지 서명란: 회사(법인)명
+                if ("회사" in ct and "법인" in ct) and i + 1 < len(cells):
                     if not cells[i+1].text.strip():
                         _set_cell_text(cells[i+1], company)
+
+                # 3페이지 서명란: 사업자등록번호
+                elif "사업자등록번호" in ct and i + 1 < len(cells):
+                    if not cells[i+1].text.strip():
+                        _set_cell_text(cells[i+1], d.get("사업자등록번호", ""))
+
+                # 서명란: 주소
+                elif ("주소" in ct or "주 소" in ct) and i + 1 < len(cells):
+                    if not cells[i+1].text.strip():
+                        _set_cell_text(cells[i+1], addr)
+
+                # 서명란: 상호 (단독 라벨)
+                elif ("상호" in ct or "상 호" in ct) \
+                        and "회사" not in ct and "법인" not in ct \
+                        and i + 1 < len(cells):
+                    if not cells[i+1].text.strip():
+                        _set_cell_text(cells[i+1], company)
+
+                # 서명란: 대표자
                 elif ("대표자" in ct or "대 표 자" in ct) and i + 1 < len(cells):
                     if not cells[i+1].text.strip():
                         _set_cell_text(cells[i+1], rep)
-                # [협력업체] 치환
-                if "[협력업체" in ct:
-                    _set_cell_text(cell, ct.replace("[협력업체", f"[{company}"))
 
     _fill_date(doc, d.get("계약연도"), d.get("계약월"), d.get("계약일"))
     return doc
