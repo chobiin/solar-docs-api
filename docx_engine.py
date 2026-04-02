@@ -2,15 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 docx_engine.py — Word 템플릿 기반 태양광 계약서류 자동입력 엔진
-Word 파일 템플릿의 표(Table) 셀 + 단락(Paragraph)을 직접 찾아 채웁니다.
-
-지원 서류:
-  1. 공급계약신고서
-  2. 이용신청서
-  3. 전력공급계약신고서
-  5. 수금용결제계좌신고서
-  6. 전기설비이용계약서
-  7. 준법서약서
+지원 서류: 1.공급계약신고서 / 2.이용신청서 / 3.전력공급계약신고서
+          5.수금용결제계좌신고서 / 6.전기설비이용계약서 / 7.준법서약서
 """
 
 import copy
@@ -103,7 +96,6 @@ def _set_label_cell_font(cell, font_size_pt=7.5):
                     rPr.insert(0, rFonts)
                 rFonts.set(qn('w:eastAsia'), '맑은 고딕')
         else:
-            # run이 없는 셀: pPr > rPr 직접 설정
             pPr = para._element.find(qn('w:pPr'))
             if pPr is None:
                 pPr = OxmlElement('w:pPr')
@@ -116,53 +108,17 @@ def _set_label_cell_font(cell, font_size_pt=7.5):
                 el = rPr_def.find(tag)
                 if el is not None:
                     rPr_def.remove(el)
-            for tag, attr in ((qn('w:sz'), qn('w:val')), (qn('w:szCs'), qn('w:val'))):
+            for tag in (qn('w:sz'), qn('w:szCs')):
                 el = rPr_def.find(tag)
                 if el is None:
                     el = OxmlElement(tag)
                     rPr_def.append(el)
-                el.set(attr, str(int(font_size_pt * 2)))
+                el.set(qn('w:val'), str(int(font_size_pt * 2)))
             rFonts = rPr_def.find(qn('w:rFonts'))
             if rFonts is None:
                 rFonts = OxmlElement('w:rFonts')
                 rPr_def.insert(0, rFonts)
             rFonts.set(qn('w:eastAsia'), '맑은 고딕')
-
-
-def _find_cell_after_label(table, label: str, col_offset: int = 1):
-    for row in table.rows:
-        for ci, cell in enumerate(row.cells):
-            if label in _cell_text(cell):
-                target_ci = ci + col_offset
-                if target_ci < len(row.cells):
-                    return row.cells[target_ci]
-    return None
-
-
-def _find_cell_by_label(table, label: str):
-    for row in table.rows:
-        for cell in row.cells:
-            if label in _cell_text(cell):
-                return cell
-    return None
-
-
-def _find_row_by_label(table, label: str):
-    for row in table.rows:
-        for cell in row.cells:
-            if label in _cell_text(cell):
-                return row
-    return None
-
-
-def _get_value_cell(row, label_col: int = 0, value_col: int = None):
-    cells = row.cells
-    if value_col is not None:
-        return cells[value_col] if value_col < len(cells) else None
-    for i in range(label_col + 1, len(cells)):
-        if not cells[i].text.strip():
-            return cells[i]
-    return cells[-1] if cells else None
 
 
 def _fill_signature_paragraphs(doc, addr: str, rep: str,
@@ -171,35 +127,73 @@ def _fill_signature_paragraphs(doc, addr: str, rep: str,
                                 skip_keywords=("서울특별시", "박승덕", "한화솔루션")):
     """
     단락(paragraph) 기반 서명란에서 주소/대표자를 채웁니다.
-    Word에서 서명란이 표가 아닌 단락으로 구성된 경우 사용.
-    라벨 run 바로 다음 빈 run에 값을 삽입합니다.
+    Word 서명란 구조 두 가지 모두 처리:
+      [A] 라벨 run + 빈 run 분리형:  run("주소:") + run("")
+      [B] 단락 끝이 라벨+콜론만으로 끝나는 경우: "    주소 :"
     """
     for para in doc.paragraphs:
         txt = para.text
         if any(kw in txt for kw in skip_keywords):
             continue
+
+        para_txt_stripped = txt.strip()
+
+        # ── [B] 단락 전체가 라벨+콜론으로만 끝나는 경우 ──
+        for addr_lbl in addr_labels:
+            pattern = addr_lbl + r'\s*:?\s*$'
+            if re.search(pattern, para_txt_stripped):
+                if para.runs:
+                    last_run = para.runs[-1]
+                    if not last_run.text.strip() or last_run.text.strip() in (':', ' '):
+                        last_run.text = last_run.text.rstrip() + addr
+                    else:
+                        new_r = para.add_run(addr)
+                        new_r.bold = False
+                break
+
+        for rep_lbl in rep_labels:
+            pattern = rep_lbl + r'\s*:?\s*$'
+            if re.search(pattern, para_txt_stripped):
+                if para.runs:
+                    last_run = para.runs[-1]
+                    if not last_run.text.strip() or last_run.text.strip() in (':', ' '):
+                        last_run.text = last_run.text.rstrip() + rep
+                    else:
+                        new_r = para.add_run(rep)
+                        new_r.bold = False
+                break
+
+        # ── [A] run 분리형: 라벨 run + 빈 run ──
         runs = para.runs
         for idx, run in enumerate(runs):
             rt = run.text.strip()
-            # 주소 라벨
+
             if any(lbl in rt for lbl in addr_labels):
-                if len(rt) > max(len(l) for l in addr_labels) + 2:
+                colon_pos = rt.find(':')
+                after_colon = rt[colon_pos+1:].strip() if colon_pos != -1 else ""
+                if after_colon and after_colon not in (addr, ""):
                     continue
+                filled = False
                 for j in range(idx + 1, len(runs)):
                     if not runs[j].text.strip():
                         runs[j].text = addr
+                        filled = True
                         break
-                else:
+                if not filled and not after_colon:
                     para.add_run(addr)
-            # 대표자 라벨
+
             elif any(lbl in rt for lbl in rep_labels):
-                if len(rt) > max(len(l) for l in rep_labels) + 2:
+                colon_pos = rt.find(':')
+                after_colon = rt[colon_pos+1:].strip() if colon_pos != -1 else ""
+                if after_colon and after_colon not in (rep, ""):
                     continue
+                filled = False
                 for j in range(idx + 1, len(runs)):
                     if not runs[j].text.strip():
                         runs[j].text = rep
+                        filled = True
                         break
-                else:
+                if not filled and not after_colon:
                     para.add_run(rep)
 
 
@@ -305,10 +299,6 @@ def fill_doc1_supply_contract(d: dict) -> Document:
 #  서류 2: 이용신청서
 # ════════════════════════════════════════════════════════
 
-def _set_label_cell_font_alias(cell, font_size_pt=7.5):
-    _set_label_cell_font(cell, font_size_pt)
-
-
 def fill_doc2_application(d: dict) -> Document:
     tpl = TEMPLATE_DIR / "2_이용신청서.docx"
     doc = Document(str(tpl))
@@ -340,7 +330,6 @@ def fill_doc2_application(d: dict) -> Document:
             cells = row.cells
             row_text = " ".join(c.text for c in cells)
 
-            # 모든 셀에서 카테고리 라벨 확인 → bold 제거 + 폰트 축소
             for ci, cc in enumerate(cells):
                 for kw in LABEL_KEYWORDS:
                     if kw in cc.text:
@@ -353,23 +342,18 @@ def fill_doc2_application(d: dict) -> Document:
             for i, cell in enumerate(cells):
                 ct = cell.text.strip()
 
-                # 하단 서명란: 주소
                 if ("주소" in ct or "주 소" in ct) \
-                        and "서울" not in row_text \
-                        and i + 1 < len(cells):
+                        and "서울" not in row_text and i + 1 < len(cells):
                     if not cells[i+1].text.strip():
                         _set_cell_text(cells[i+1], d.get("사업장주소", ""))
                     continue
 
-                # 하단 서명란: 대표자
                 if ("대표자" in ct or "대 표 자" in ct) \
-                        and "박승덕" not in row_text \
-                        and i + 1 < len(cells):
+                        and "박승덕" not in row_text and i + 1 < len(cells):
                     if not cells[i+1].text.strip():
                         _set_cell_text(cells[i+1], d.get("대표자명", ""))
                     continue
 
-                # 일반 필드 매핑
                 for label, value in field_map.items():
                     if label in ct:
                         if i + 1 < len(cells):
@@ -378,7 +362,6 @@ def fill_doc2_application(d: dict) -> Document:
                                 _set_cell_text(target, value)
                         break
 
-    # 하단 서명란이 단락(paragraph) 구조인 경우 추가 처리
     _fill_signature_paragraphs(
         doc,
         addr=d.get("사업장주소", ""),
@@ -653,8 +636,14 @@ def _normalize_data(d: dict) -> dict:
         data["계약월"] = str(today.month)
     if not data.get("계약일"):
         data["계약일"] = str(today.day)
-    if not data.get("발전기주소"):
+
+    # 발전기주소: 프론트에서 빈 문자열로 넘어와도 사업장주소로 대체
+    gen_addr = data.get("발전기주소", "").strip()
+    if not gen_addr:
         data["발전기주소"] = data.get("사업장주소", "")
+    else:
+        data["발전기주소"] = gen_addr
+
     biz = data.get("사업자등록번호", "")
     biz_clean = re.sub(r"[^0-9]", "", biz)
     if len(biz_clean) == 10 and "-" not in biz:
